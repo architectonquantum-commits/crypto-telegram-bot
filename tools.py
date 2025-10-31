@@ -26,7 +26,6 @@ def normalize_symbol(symbol: str) -> str:
         return symbol.replace("USDT", "/USDT")
     return symbol
 
-
 BACKEND_URL = os.getenv("BACKEND_URL")
 
 if not BACKEND_URL:
@@ -34,9 +33,18 @@ if not BACKEND_URL:
 else:
     print(f"✅ Backend configurado: {BACKEND_URL}")
 
+# Warnings contextuales por timeframe
+TIMEFRAME_WARNINGS = {
+    "15m": "⚠️ SCALPING: Verifica precio ACTUAL en tu exchange antes de entrar",
+    "30m": "📊 Datos de hace {age} - Verifica contexto actual antes de operar",
+    "1h": "✅ Datos recientes - Válido para swing trading",
+    "4h": "✅ Tendencia confirmada - Timeframe posicional"
+}
+
 def get_scanner_analysis(timeframe: str = "1h") -> Dict[str, Any]:
     """
-    Ejecuta el scanner usando el endpoint con caché (respuesta < 1 segundo)
+    Ejecuta el scanner usando el endpoint con caché
+    ACEPTA CACHÉ STALE - mejor dato viejo que timeout
     """
     if not BACKEND_URL:
         return {
@@ -48,22 +56,28 @@ def get_scanner_analysis(timeframe: str = "1h") -> Dict[str, Any]:
         print(f"🔍 Llamando scanner CACHEADO en {timeframe}...")
         response = requests.post(
             f"{BACKEND_URL}/api/scanner/cached/run",
-            auth=("architecton", "751826Tm#@!"),
             json={
                 "timeframe": timeframe,
                 "use_cache": True,
-                "max_cache_age": 5
+                "min_confluence": 70.0
             },
-            timeout=60  # Reducido a 10 segundos (debería responder en <1s)
+            timeout=180  # 3 minutos máx
         )
         response.raise_for_status()
         data = response.json()
         
         is_cached = data.get("cached", False)
         exec_time = data.get("execution_time", 0)
+        cache_age = data.get("cache_age_seconds", 0)
+        cache_age_human = data.get("cache_age_human", "")
+        
+        # Agregar warning contextual
+        warning = None
+        if is_cached and cache_age > 0:
+            warning = TIMEFRAME_WARNINGS.get(timeframe, "").format(age=cache_age_human)
         
         if is_cached:
-            print(f"✅ Cache HIT! Respuesta en {exec_time:.2f}s")
+            print(f"✅ Cache HIT! Respuesta en {exec_time:.2f}s (edad: {cache_age_human})")
         else:
             print(f"✅ Scanner ejecutado y cacheado en {exec_time:.2f}s")
         
@@ -71,30 +85,18 @@ def get_scanner_analysis(timeframe: str = "1h") -> Dict[str, Any]:
             "success": True,
             "data": data,
             "timeframe": timeframe,
-            "cached": is_cached
+            "cached": is_cached,
+            "cache_age": cache_age_human if is_cached else None,
+            "warning": warning
         }
+        
     except requests.exceptions.Timeout:
-        print(f"⏱️ Timeout - intentando sin caché...")
-        # Fallback: intentar sin caché si el timeout fue por primera ejecución
-        try:
-            response = requests.post(
-                f"{BACKEND_URL}/api/scanner/run",
-                auth=("architecton", "751826Tm#@!"),
-                json={"timeframe": timeframe},
-                timeout=120
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "timeframe": timeframe,
-                "cached": False
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Error en fallback: {str(e)}"
-            }
+        print(f"⏱️ Timeout en {timeframe}")
+        return {
+            "success": False,
+            "error": f"Timeout ejecutando scanner en {timeframe}. El servidor puede estar sobrecargado. Intenta con otro timeframe o espera 30 segundos.",
+            "timeout": True
+        }
     except Exception as e:
         print(f"❌ Error en scanner: {e}")
         return {
@@ -149,14 +151,14 @@ def validate_signal(
 TOOLS = [
     {
         "name": "get_scanner_analysis",
-        "description": "Ejecuta el scanner de señales en el backend con CACHÉ OPTIMIZADO (respuesta <1 segundo). Retorna las mejores oportunidades del momento con confluencias, precio actual, stop loss y take profit sugeridos. USA ESTA HERRAMIENTA PRIMERO para obtener datos reales del mercado.",
+        "description": "Ejecuta el scanner de señales con CACHÉ INTELIGENTE. Usa caché reciente cuando está disponible (respuesta <2s), o genera datos frescos si es necesario. IMPORTANTE: Si da timeout, recomienda al usuario intentar con otro timeframe. Los timeframes más grandes (4h) tienen más probabilidad de tener caché disponible.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "timeframe": {
                     "type": "string",
                     "enum": ["15m", "30m", "1h", "4h"],
-                    "description": "Timeframe para el scanner"
+                    "description": "Timeframe para el scanner. 15m=scalping, 30m=intraday, 1h=swing, 4h=tendencias"
                 }
             },
             "required": ["timeframe"]
